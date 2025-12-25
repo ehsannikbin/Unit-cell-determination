@@ -1,6 +1,8 @@
 # Unit-cell-determination
 This toolkit determines unit cell parameters from randomly oriented electron diffraction patterns.
+
 Workflow:
+
 1- Facet Selection (facet_selector.py):
     Loads raw .h5 diffraction patterns form a file list.
     User interactively selects valid facets.
