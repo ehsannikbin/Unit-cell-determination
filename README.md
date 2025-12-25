@@ -1,6 +1,6 @@
 # Electron Diffraction Unit Cell Determination Pipeline
 
-![Python Version](https://img.shields.io/badge/python-3.12-blue)
+![Python Version](https://img.shields.io/badge/python-3.14-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 ## Overview
@@ -20,10 +20,8 @@ The code is organized to support a multi-step workflow:
 ├── scripts/
 │   ├── 01_facet_selector.py      # GUI for processing patterns and extracting vectors
 │   ├── 02_unit_cell_finder.py    # (Planned) Solves unit cell from .csv data
-│   └── utils.py                  # Shared physical constants (h, m0, etc.)
 ├── input_data/                   # Place your .lst or .h5 files here
 ├── output_data/                  # Destination for .csv results
-├── environment.yml               # Conda environment configuration
 └── README.md                     # Project documentation
 ```
 
@@ -39,12 +37,12 @@ cd REPO_NAME
 
 **2. Create the environment:**
 ```bash
-conda env create -f environment.yml
+conda create -n unit_cell python=3.14 h5py numpy matplotlib scipy pyside6 -c conda-forge
 ```
 
 **3. Activate the environment:**
 ```bash
-conda activate diffraction_env
+conda activate unit_cell
 ```
 
 ## 2. Usage: Step 1 (Facet Selector)
@@ -53,7 +51,7 @@ This script calculates the autocorrelation of diffraction patterns to help users
 
 **Run the script:**
 ```bash
-python scripts/01_facet_selector.py
+python scripts/facet_selector.py
 ```
 
 ### GUI Features & Controls
@@ -80,7 +78,7 @@ python scripts/01_facet_selector.py
 ## 3. Input & Output Data
 
 ### Input Format (.h5)
-The software reads HDF5 files. Each file is expected to contain the following datasets:
+The software reads HDF5 files from a file list. Each file is expected to contain the following datasets:
 * `/data`: The raw diffraction images.
 * `/peaks`: Peak positions (x, y) pre-calculated by peak-finding software.
 * `/center`: The direct beam center coordinates (x, y).
@@ -98,7 +96,7 @@ The results are saved as a **CSV file** (default: `facet_vectors.csv`) containin
 *(Note: Patterns marked as excluded in the GUI are skipped in this file).*
 
 ## Dependencies
-* **Python 3.12**
+* **Python 3.14**
 * **PySide6** (Qt GUI framework)
 * **Matplotlib** (Plotting and visualization)
 * **NumPy & SciPy** (Math and image processing)
