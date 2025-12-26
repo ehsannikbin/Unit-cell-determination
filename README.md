@@ -71,7 +71,7 @@ python scripts/01_facet_selector.py
     * **Jump:** Type a specific pattern number to jump directly to it.
 
 * **Filtering:**
-    * **Include this facet:** Check/Uncheck this box to determine if the current pattern's vectors should be saved.
+    * **Include this facet:** Check/Uncheck this box to determine if the current pattern's vectors should be saved. You only need to include ~10-30 facets from the dataset.
     * **Parameters:** Adjust **AC Threshold** and **Min Separation** to fine-tune peak detection.
 
 ---
