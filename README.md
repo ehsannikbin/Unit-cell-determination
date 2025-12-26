@@ -126,9 +126,9 @@ The final unit cell is saved as a text file (e.g., `unit_cell.txt`):
 
 ```text
 # Crystal system = monoclinic
-a= 13.731 A
-b= 9.203 A
-c= 8.497 A
+a = 13.731 A
+b = 9.203 A
+c = 8.497 A
 alpha = 90.000 deg
 beta = 100.060 deg
 gamma = 90.000 deg
