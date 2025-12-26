@@ -9,7 +9,7 @@ This repository contains a computational pipeline designed to determine crystal 
 
 The workflow bridges the gap between raw microscope data and crystallographic parameters. It consists of two main stages:
 1.  **Facet Selection:** Interactive visualization and extraction of reciprocal lattice vectors.
-2.  **Unit Cell Determination:** (In development) Algorithms to solve the unit cell parameters based on the extracted vectors.
+2.  **Unit Cell Determination:** A hybrid optimization algorithm (Global + Local) to solve unit cell parameters based on the extracted vectors.
 
 ## Repository Structure
 
@@ -19,7 +19,7 @@ The code is organized to support a multi-step workflow:
 .
 ├── scripts/
 │   ├── 01_facet_selector.py      # GUI for processing patterns and extracting vectors
-│   ├── 02_unit_cell_finder.py    # (Planned) Solves unit cell from .csv data
+│   ├── 02_unit_cell_finder.py    # GUI for solving the unit cell from .csv data
 ├── input_data/                   # Place your .lst or .h5 files here
 ├── output_data/                  # Destination for .csv results
 └── README.md                     # Project documentation
@@ -27,17 +27,17 @@ The code is organized to support a multi-step workflow:
 
 ## 1. Installation
 
-To ensure all dependencies (GUI, math, plotting) work correctly, please use the provided Conda environment.
+To ensure all dependencies (GUI, math, plotting, JIT compilation) work correctly, please use the provided Conda environment.
 
 **1. Clone the repository:**
 ```bash
-git clone https://github.com/YOUR_USERNAME/REPO_NAME.git
+git clone [https://github.com/YOUR_USERNAME/REPO_NAME.git](https://github.com/YOUR_USERNAME/REPO_NAME.git)
 cd REPO_NAME
 ```
 
 **2. Create the environment:**
 ```bash
-conda create -n unit_cell python=3.14 h5py numpy matplotlib scipy pyside6 -c conda-forge
+conda create -n unit_cell python=3.14 h5py numpy matplotlib scipy pyside6 numba -c conda-forge
 ```
 
 **3. Activate the environment:**
@@ -51,56 +51,96 @@ This script calculates the autocorrelation of diffraction patterns to help users
 
 **Run the script:**
 ```bash
-python scripts/facet_selector.py
+python scripts/01_facet_selector.py
 ```
 
 ### GUI Features & Controls
 
 * **File Loading & Performance:**
-    * **Max Load:** Set a limit (e.g., 500) to randomly subsample large datasets (e.g., if you have 10,000 patterns but only need a statistical sample).
+    * **Max Load:** Randomly subsample large datasets (e.g., limit to 500 patterns for statistical sampling).
     * **Processors:** Adjust the number of CPU cores used for parallel autocorrelation calculations.
-    * **Progress Bar:** Visual feedback during the loading and processing phase.
+    * **Progress Bar:** Visual feedback during the loading phase.
 
 * **Visualization:**
     * **Toggle AC:** Switch between the raw diffraction pattern and the Autocorrelation view.
-    * **Zoom:** Use the **Mouse Wheel** to zoom in/out. The canvas automatically resizes to fill the window.
+    * **Zoom:** Use the **Mouse Wheel** to zoom in/out.
     * **Show Peaks/Facets:** Toggle overlays on and off.
 
 * **Navigation:**
-    * **Buttons:** Use the **Previous/Next** buttons.
-    * **Keyboard:** Use **Left/Right Arrow Keys** on your keyboard (Note: these keys are disabled while typing in text boxes to prevent accidental navigation).
+    * **Keyboard:** Use **Left/Right Arrow Keys** to navigate.
     * **Jump:** Type a specific pattern number to jump directly to it.
 
 * **Filtering:**
-    * **Include this facet:** Check/Uncheck this box to determine if the current pattern's vectors should be saved to the output file.
+    * **Include this facet:** Check/Uncheck this box to determine if the current pattern's vectors should be saved.
     * **Parameters:** Adjust **AC Threshold** and **Min Separation** to fine-tune peak detection.
 
-## 3. Input & Output Data
+---
 
-### Input Format (.h5)
-The software reads HDF5 files from a file list. Each file is expected to contain the following datasets:
-* `/data`: The raw diffraction images.
-* `/peaks`: Peak positions (x, y) pre-calculated by peak-finding software.
-* `/center`: The direct beam center coordinates (x, y).
+## 3. Usage: Step 2 (Unit Cell Finder)
 
-### Output Format (.csv)
-The results are saved as a **CSV file** (default: `facet_vectors.csv`) containing the reciprocal lattice vectors ($s_1, s_2$) and the angle between them ($\theta$).
+This script takes the output from Step 1 (`facet_vectors.csv`) and determines the unit cell parameters ($a, b, c, \alpha, \beta, \gamma$). It uses **Numba-accelerated** Differential Evolution (Global Search) followed by L-BFGS-B (Local Refinement) to find the best fit.
 
-**Example Output:**
+**Run the script:**
+```bash
+python scripts/02_unit_cell_finder.py
+```
+
+### GUI Features & Controls
+
+* **Input & Output:**
+    * **Files:** Browse to select your input `.csv` file.
+    * **Custom Naming:** Define custom filenames for the output run log and unit cell result file.
+
+* **Crystal Settings:**
+    * **System:** Select from 7 crystal systems (Triclinic, Monoclinic, Orthorhombic, etc.). The parameter range inputs dynamically update based on your selection.
+    * **Centering:** Choose the centering type (P, I, F, A, B, C, R).
+    * **Ranges:** Define Min/Max constraints for real-space parameters ($\text{\AA}$ and Degrees) to guide the optimizer.
+
+* **Algorithm Controls:**
+    * **Max hkl (M):** Define the search radius for integer indices (e.g., $\pm 6$).
+    * **Optimization:** Adjust **Population Size** and **Max Iterations** for the Global Search.
+    * **Tolerances:** Set the Relative Length Tolerance and Absolute Cosine Tolerance for matching vector pairs.
+    * **Processors:** Control parallelization. Set to `-1` to use all cores, or `1` for serial execution (often faster for smaller datasets due to reduced overhead).
+
+* **Advanced Features:**
+    * **Outlier Rejection:** Optional 2-stage refinement. The algorithm first finds a consensus cell, then drops the worst-fitting patterns (e.g., worst 20%) and re-refines the cell to improve accuracy.
+
+## 4. Input & Output Data
+
+### Input Format (Step 1)
+The software reads HDF5 files containing:
+* `/data`: Raw diffraction images.
+* `/peaks`: Pre-calculated peak positions.
+* `/center`: Direct beam center coordinates.
+
+### Intermediate Data (Step 1 Output -> Step 2 Input)
+The results from Step 1 are saved as a **CSV file** containing reciprocal lattice vectors ($s_1, s_2$) and the angle ($\theta$).
+
 | s0_Ainv | s1_Ainv | angle_deg |
 | :--- | :--- | :--- |
 | 0.04512 | 0.05201 | 59.8 |
 | 0.06100 | 0.06100 | 89.9 |
-| ... | ... | ... |
 
-*(Note: Patterns marked as excluded in the GUI are skipped in this file).*
+### Final Output (Step 2 Output)
+The final unit cell is saved as a text file (e.g., `unit_cell.txt`):
+
+```text
+# Crystal system = monoclinic
+a= 13.731 A
+b= 9.203 A
+c= 8.497 A
+alpha = 90.000 deg
+beta = 100.060 deg
+gamma = 90.000 deg
+```
 
 ## Dependencies
 * **Python 3.14**
-* **PySide6** (Qt GUI framework)
-* **Matplotlib** (Plotting and visualization)
-* **NumPy & SciPy** (Math and image processing)
-* **h5py** (Data handling)
+* **PySide6** (GUI)
+* **Numba** (JIT Compilation for high-performance math)
+* **NumPy & SciPy** (Optimization and array processing)
+* **Matplotlib** (Visualization)
+* **h5py** (HDF5 file handling)
 
 ## License
 This project is licensed under the MIT License.
