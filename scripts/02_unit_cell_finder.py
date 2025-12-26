@@ -364,9 +364,9 @@ class OptimizationWorker(QObject):
 
            # Custom formatted string
             formatted_output = (f"# Crystal system = {s['system']}\n"
-                                f"a= {a:.3f} Å\n"
-                                f"b= {b:.3f} Å\n"
-                                f"c= {c:.3f} Å\n"
+                                f"a = {a:.3f} Å\n"
+                                f"b = {b:.3f} Å\n"
+                                f"c = {c:.3f} Å\n"
                                 f"alpha = {al:.3f} deg\n"
                                 f"beta = {be:.3f} deg\n"
                                 f"gamma = {ga:.3f} deg")
@@ -765,3 +765,4 @@ if __name__ == "__main__":
     window = CrystalApp()
     window.show()
     sys.exit(app.exec())
+
