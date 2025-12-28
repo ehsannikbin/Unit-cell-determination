@@ -243,6 +243,21 @@ class OptimizationWorker(QObject):
             patterns = np.array([(l1, l2, np.cos(np.deg2rad(theta))) 
                                  for (l1, l2, theta) in pattern_data], dtype=float)
             
+            # --- NEW FEATURE: RANDOM SUBSET SELECTION ---
+            # s['subset_count'] comes from the GUI SpinBox (-1 means all)
+            total_loaded = len(patterns)
+            req_subset = s.get('subset_count', -1)
+            
+            if req_subset != -1 and req_subset < total_loaded and req_subset > 0:
+                self.log(f"Randomly selecting {req_subset} facets out of {total_loaded}...")
+                # Use numpy random choice without replacement
+                indices = np.random.choice(total_loaded, req_subset, replace=False)
+                patterns = patterns[indices]
+                self.log(f"Subset selection complete. Working with {len(patterns)} facets.")
+            else:
+                self.log(f"Using all {total_loaded} facets.")
+            # --------------------------------------------
+
             # 2. Build Candidates
             candidates = self.build_integer_candidates(s['M'], s['centering'])
             U = candidates.astype(float)
@@ -483,9 +498,6 @@ def _fast_score_calc(patterns, U, H, G, tol_len_rel, tol_cos_abs):
         
         # Fallback
         if len(idx1)==0:
-             errs = np.abs(pred_lens[i] - l1)
-             # Basic sort manually or just penalize to save speed in outlier check
-             # For outlier check, if it requires fallback, it's likely a bad point anyway
              scores[p] = 1e6; continue
         if len(idx2)==0:
              scores[p] = 1e6; continue
@@ -543,6 +555,9 @@ class CrystalApp(QMainWindow):
         self.setWindowTitle("Diffraction Cell Finder")
         self.resize(1150, 850)
         
+        # State variable for max facets in loaded file
+        self.loaded_total_facets = 0 
+        
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
         layout = QHBoxLayout(main_widget)
@@ -569,7 +584,21 @@ class CrystalApp(QMainWindow):
         self.log_name = QLineEdit("run_log.txt")
         self.cell_name = QLineEdit("unit_cell.txt")
         
+        # --- NEW FACET SELECTION WIDGETS ---
+        self.lbl_facets_total = QLabel("Total Facets in File: N/A")
+        
+        self.sb_facets_use = QSpinBox()
+        self.sb_facets_use.setRange(-1, 9999999) # Large range
+        self.sb_facets_use.setValue(-1)
+        self.sb_facets_use.setSpecialValueText("All") # -1 displays as "All"
+        self.sb_facets_use.setToolTip("Select number of facets to use randomly. -1 uses all available.")
+        # Connect to validation function
+        self.sb_facets_use.editingFinished.connect(self.validate_facet_count)
+        self.sb_facets_use.valueChanged.connect(self.validate_facet_count)
+
         file_layout.addRow("Input CSV:", h_file)
+        file_layout.addRow(self.lbl_facets_total)       # New Row
+        file_layout.addRow("Facets to use:", self.sb_facets_use) # New Row
         file_layout.addRow("Log Name:", self.log_name)
         file_layout.addRow("Cell Name:", self.cell_name)
         file_group.setLayout(file_layout)
@@ -670,7 +699,45 @@ class CrystalApp(QMainWindow):
 
     def browse_file(self):
         f, _ = QFileDialog.getOpenFileName(self, "Select CSV", "", "CSV Files (*.csv)")
-        if f: self.path_edit.setText(f)
+        if f: 
+            self.path_edit.setText(f)
+            # --- NEW: Count lines immediately to update GUI ---
+            try:
+                count = 0
+                with open(f, 'r', encoding='utf-8') as csvf:
+                    reader = csv.reader(csvf)
+                    for row in reader:
+                        if len(row) >= 3:
+                            try:
+                                # Ensure it's valid data
+                                float(row[-3]); float(row[-2]); float(row[-1])
+                                count += 1
+                            except: pass
+                
+                self.loaded_total_facets = count
+                self.lbl_facets_total.setText(f"Total Facets in File: {count}")
+                self.sb_facets_use.setValue(-1) # Default to All when loading new file
+            except Exception as e:
+                self.lbl_facets_total.setText("Total Facets in File: Error")
+                self.loaded_total_facets = 0
+
+    def validate_facet_count(self):
+        """
+        Ensures the user input for facet count does not exceed total loaded facets.
+        """
+        val = self.sb_facets_use.value()
+        # If val is -1, it means "All", which is valid.
+        if val == -1:
+            return
+            
+        if self.loaded_total_facets > 0:
+            if val > self.loaded_total_facets:
+                self.sb_facets_use.setValue(self.loaded_total_facets)
+        elif self.loaded_total_facets == 0 and val > 0:
+             # If no file loaded yet, maybe just let it be or reset?
+             # But requirement says "When user loads file... if user inputs bigger..."
+             # So we enforce mostly when file is known.
+             pass
 
     def update_range_inputs(self, system):
         for k, v in self.inputs.items():
@@ -718,7 +785,9 @@ class CrystalApp(QMainWindow):
             'de_tol': 1e-6,
             'use_outliers': self.chk_outlier.isChecked(),
             'keep_pct': self.sb_keep.value(),
-            'workers': self.sb_workers.value()
+            'workers': self.sb_workers.value(),
+            # --- Pass the new setting ---
+            'subset_count': self.sb_facets_use.value()
         }
 
         self.thread = QThread()
@@ -765,4 +834,4 @@ if __name__ == "__main__":
     window = CrystalApp()
     window.show()
     sys.exit(app.exec())
-
+  
