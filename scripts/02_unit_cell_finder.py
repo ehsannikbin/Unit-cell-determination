@@ -6,6 +6,15 @@ import numpy as np
 import multiprocessing
 from math import radians
 
+# --- NEW IMPORTS FOR CELL REDUCTION ---
+try:
+    from pymatgen.core import Lattice, Structure
+    from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
+    PYMATGEN_AVAILABLE = True
+except ImportError:
+    PYMATGEN_AVAILABLE = False
+    print("Warning: pymatgen not installed. Cell reduction feature will be disabled.")
+
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QLabel, QLineEdit, QPushButton, 
                                QTextEdit, QComboBox, QSpinBox, QDoubleSpinBox, 
@@ -17,11 +26,18 @@ from scipy.optimize import differential_evolution, minimize
 from numba import njit
 
 # =============================================================================
-#  PART 1: GLOBAL ALGORITHMS (Must be top-level for Multiprocessing)
+# USER CONFIGURATION
+# =============================================================================
+# False = Use "Closest 8" neighbors (Soft Fallback) - Better for convergence
+# True  = Apply high penalty (Hard Fallback) - Stricter, discards bad fits immediately
+USE_HARD_FALLBACK = True
+
+# =============================================================================
+#  PART 1: GLOBAL ALGORITHMS
 # =============================================================================
 
 @njit(fastmath=True, cache=True)
-def fast_objective_loop(patterns, U, H, G, tol_len_rel, tol_cos_abs):
+def fast_objective_loop(patterns, U, H, G, tol_len_rel, tol_cos_abs, use_hard_fallback):
     """
     Optimized loop matching your original logic.
     Includes the 'Fallback' (best 8) and Cosine Tolerance.
@@ -75,15 +91,22 @@ def fast_objective_loop(patterns, U, H, G, tol_len_rel, tol_cos_abs):
             if re2 <= tol_len_rel: idx2.append(i)
             
         # --- FALLBACK MECHANISM ---
-        if len(idx1) == 0:
-            errs = np.abs(pred_lens_all - l1)
-            sorted_indices = np.argsort(errs)
-            for k in range(8): idx1.append(sorted_indices[k])
+        if len(idx1) == 0 or len(idx2) == 0:
+            if use_hard_fallback:
+                # Option A: Hard Penalty (Skip this pattern)
+                total_residual += 1e9
+                continue
+            else:
+                # Option B: Closest 8 (Original logic)
+                if len(idx1) == 0:
+                    errs = np.abs(pred_lens_all - l1)
+                    sorted_indices = np.argsort(errs)
+                    for k in range(8): idx1.append(sorted_indices[k])
                 
-        if len(idx2) == 0:
-            errs = np.abs(pred_lens_all - l2)
-            sorted_indices = np.argsort(errs)
-            for k in range(8): idx2.append(sorted_indices[k])
+                if len(idx2) == 0:
+                    errs = np.abs(pred_lens_all - l2)
+                    sorted_indices = np.argsort(errs)
+                    for k in range(8): idx2.append(sorted_indices[k])
 
         len_idx1 = len(idx1)
         len_idx2 = len(idx2)
@@ -197,7 +220,7 @@ def vec6_to_G(vec6):
 
 # IMPORTANT: This wrapper must accept ALL data as arguments.
 # This allows 'differential_evolution' to pickle it and send it to workers.
-def objective_wrapper(free, patterns, U, candidates, system, tol_len_rel, tol_cos_abs):
+def objective_wrapper(free, patterns, U, candidates, system, tol_len_rel, tol_cos_abs, use_hard_fallback):
     vec6 = free_to_metric_vector(free, system)
     G = vec6_to_G(vec6)
 
@@ -209,7 +232,81 @@ def objective_wrapper(free, patterns, U, candidates, system, tol_len_rel, tol_co
     except:
         return 1e12
 
-    return fast_objective_loop(patterns, U, candidates, G, tol_len_rel, tol_cos_abs)
+    # Pass it to the loop
+    return fast_objective_loop(patterns, U, candidates, G, tol_len_rel, tol_cos_abs, use_hard_fallback)
+
+
+# --- CELL REDUCTION FUNCTION ---
+def get_lattice_point_group(a, b, c, alpha, beta, gamma, 
+                            scan_range=(0.01, 1.0), step=0.05):
+    """
+    Determines the Point Group and Bravais Lattice of an experimental unit cell.
+    Optimized for reliability when atomic positions are unknown.
+    """
+    if not PYMATGEN_AVAILABLE:
+        return {"status": "Failure", "reason": "Pymatgen not installed"}
+    
+    # Create Dummy Structure
+    try:
+        lat = Lattice.from_parameters(a, b, c, alpha, beta, gamma)
+        dummy_struct = Structure(lat, ["H"], [[0, 0, 0]])
+    except Exception as e:
+        return {"error": str(e)}
+
+    best_sg_number = 0
+    best_result = None
+    best_tol = 0.0
+
+    # 1. Scan Tolerances to find highest geometric symmetry
+    # This ensures we don't miss Centered lattices due to large cell errors
+    for tol in np.arange(scan_range[0], scan_range[1], step):
+        sga = SpacegroupAnalyzer(dummy_struct, symprec=tol)
+        try:
+            sg_num = sga.get_space_group_number()
+            if sg_num >= best_sg_number:
+                best_sg_number = sg_num
+                best_tol = tol
+                best_result = sga
+        except:
+            continue
+
+    if not best_result:
+        return {"status": "Failure", "reason": "No valid lattice found"}
+
+    # 2. Extract Reliable Data
+    dataset = best_result.get_symmetry_dataset()
+    conv_struct = best_result.get_conventional_standard_structure()
+    
+    # Point Group (International/Hermann-Mauguin notation)
+    point_group = dataset['pointgroup']
+    
+    # Bravais Lattice Symbol (e.g., cF, mC, oI)
+    crystal_sys = best_result.get_crystal_system()
+    lat_type = dataset['international'][0] # P, I, F, C, A, R
+    
+    # Map system names to Pearson symbol letters
+    sys_map = {
+        "triclinic": "a", "monoclinic": "m", "orthorhombic": "o", 
+        "tetragonal": "t", "trigonal": "h", "hexagonal": "h", "cubic": "c"
+    }
+    pearson_symbol = f"{sys_map.get(crystal_sys, '?')}{lat_type}"
+
+    return {
+        "status": "Success",
+        "tolerance_used": f"{best_tol:.2f} Å",
+        "crystal_system": crystal_sys.title(),
+        "point_group": point_group,
+        "bravais_lattice": pearson_symbol, # e.g., mC, cF
+        "lattice_centering": f"{lat_type}-Centered",
+        
+        # Conventional Parameters (The standardized box)
+        "std_a": np.round(conv_struct.lattice.a, 4),
+        "std_b": np.round(conv_struct.lattice.b, 4),
+        "std_c": np.round(conv_struct.lattice.c, 4),
+        "std_alpha": np.round(conv_struct.lattice.alpha, 3),
+        "std_beta":  np.round(conv_struct.lattice.beta, 3),
+        "std_gamma": np.round(conv_struct.lattice.gamma, 3),
+    }
 
 # =============================================================================
 #  PART 2: WORKER THREAD
@@ -244,20 +341,17 @@ class OptimizationWorker(QObject):
                                  for (l1, l2, theta) in pattern_data], dtype=float)
             
             # --- NEW FEATURE: RANDOM SUBSET SELECTION ---
-            # s['subset_count'] comes from the GUI SpinBox (-1 means all)
             total_loaded = len(patterns)
             req_subset = s.get('subset_count', -1)
             
             if req_subset != -1 and req_subset < total_loaded and req_subset > 0:
                 self.log(f"Randomly selecting {req_subset} facets out of {total_loaded}...")
-                # Use numpy random choice without replacement
                 indices = np.random.choice(total_loaded, req_subset, replace=False)
                 patterns = patterns[indices]
                 self.log(f"Subset selection complete. Working with {len(patterns)} facets.")
             else:
                 self.log(f"Using all {total_loaded} facets.")
-            # --------------------------------------------
-
+            
             # 2. Build Candidates
             candidates = self.build_integer_candidates(s['M'], s['centering'])
             U = candidates.astype(float)
@@ -267,8 +361,7 @@ class OptimizationWorker(QObject):
             bounds = self.get_bounds(s['system'], s['ranges'])
 
             # 4. Arguments
-            # (patterns, U, candidates, system, tol_len, tol_cos)
-            args = (patterns, U, candidates, s['system'], s['tol_len_rel'], s['tol_cos_abs'])
+            args = (patterns, U, candidates, s['system'], s['tol_len_rel'], s['tol_cos_abs'], USE_HARD_FALLBACK)
 
             # 5. Global Search (DE)
             self.log("Starting Differential Evolution (global search)...")
@@ -277,16 +370,11 @@ class OptimizationWorker(QObject):
             objective_wrapper(dummy, *args)
             self.log("Compilation done.")
 
-            # Define Callback with Closure to access self
             def de_callback(xk, convergence):
-                # We can't log every single step or GUI floods, but Scipy calls this once per generation
-                # We need generation count. Scipy doesn't pass it, so we use a mutable counter
                 de_callback.iter += 1
                 val = objective_wrapper(xk, *args)
                 if val < de_callback.best: de_callback.best = val
                 
-                # Mimic original log format:
-                # [DE gen X] time=Ys obj=Z best=Z conv=C
                 if de_callback.iter % 10 == 0:
                     t_el = time.time() - self.start_time
                     msg = f"[DE gen {de_callback.iter}] time={t_el:.1f}s obj={val:.6g} best={de_callback.best:.6g} conv={convergence:.4g}"
@@ -295,7 +383,6 @@ class OptimizationWorker(QObject):
             de_callback.iter = 0
             de_callback.best = np.inf
 
-            # WORKERS: Pass the user setting (-1 = All)
             n_workers = s['workers']
             
             res_de = differential_evolution(
@@ -319,7 +406,6 @@ class OptimizationWorker(QObject):
             
             if s['use_outliers']:
                 self.log(f"\n--- Outlier Detection ---")
-                # Calculate scores (One pass)
                 scores = self.calculate_scores(patterns, U, candidates, current_x, s)
                 threshold = np.percentile(scores, s['keep_pct'])
                 good_mask = scores <= threshold
@@ -334,8 +420,7 @@ class OptimizationWorker(QObject):
                     self.log("WARNING: Too few patterns left. Skipping refinement.")
                 else:
                     patterns = patterns[good_mask]
-                    # Update args
-                    args = (patterns, U, candidates, s['system'], s['tol_len_rel'], s['tol_cos_abs'])
+                    args = (patterns, U, candidates, s['system'], s['tol_len_rel'], s['tol_cos_abs'], USE_HARD_FALLBACK)
             
             # 8. Local Refinement
             self.log("Starting local refinement (L-BFGS-B)...")
@@ -356,7 +441,7 @@ class OptimizationWorker(QObject):
             G_real = np.linalg.inv(G_final)
             a, b, c, al, be, ga = self.lattice_from_metric(G_real)
 
-            # Build strings for logging (Exactly like original)
+            # Build strings for logging
             recip_str = (f"\n=== Final Reciprocal Lattice Parameters ===\n"
                          f"a* = {astar:.6f} 1/Å\n"
                          f"b* = {bstar:.6f} 1/Å\n"
@@ -377,7 +462,7 @@ class OptimizationWorker(QObject):
             self.log(real_str)
             self.log(f"\nTotal runtime: {time.time()-self.start_time:.1f}s")
 
-           # Custom formatted string
+            # Custom formatted string
             formatted_output = (f"# Crystal system = {s['system']}\n"
                                 f"a = {a:.3f} Å\n"
                                 f"b = {b:.3f} Å\n"
@@ -389,7 +474,9 @@ class OptimizationWorker(QObject):
             # Result Dict
             results = {
                 'params_str': formatted_output,
-                'system': s['system']
+                'system': s['system'],
+                # NEW: Pass Raw parameters for Reduction Step
+                'raw_params': (a, b, c, al, be, ga) 
             }
             self.finished_signal.emit(results)
 
@@ -458,8 +545,6 @@ class OptimizationWorker(QObject):
         return a, b, c, np.degrees(np.arccos(cos_al)), np.degrees(np.arccos(cos_be)), np.degrees(np.arccos(cos_ga))
 
     def calculate_scores(self, patterns, U, candidates, free_params, s):
-        # Helper to run one pass and return scores for outlier rejection
-        # Must re-create G and run a specialized scoring loop
         vec6 = free_to_metric_vector(free_params, s['system'])
         G = vec6_to_G(vec6)
         return _fast_score_calc(patterns, U, candidates, G, s['tol_len_rel'], s['tol_cos_abs'])
@@ -557,6 +642,7 @@ class CrystalApp(QMainWindow):
         
         # State variable for max facets in loaded file
         self.loaded_total_facets = 0 
+        self.last_res = None # Stores last optimization result
         
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
@@ -680,6 +766,14 @@ class CrystalApp(QMainWindow):
         self.run_btn.clicked.connect(self.start_optimization)
         left_layout.addWidget(self.run_btn)
         
+        # --- NEW: CELL REDUCTION BUTTON ---
+        self.reduce_btn = QPushButton("FIND CONVENTIONAL CELL")
+        self.reduce_btn.setFixedHeight(40)
+        self.reduce_btn.setStyleSheet("font-weight: bold; font-size: 12px; background-color: #555555; color: white;")
+        self.reduce_btn.setEnabled(False) # Disabled until opt is done
+        self.reduce_btn.clicked.connect(self.run_cell_reduction)
+        left_layout.addWidget(self.reduce_btn)
+        
         # --- Right Panel: Log ---
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
@@ -762,6 +856,7 @@ class CrystalApp(QMainWindow):
             return
 
         self.run_btn.setEnabled(False)
+        self.reduce_btn.setEnabled(False) # Disable reduction during run
         self.text_log.clear()
         
         ranges = []
@@ -808,6 +903,9 @@ class CrystalApp(QMainWindow):
 
     def on_finished(self, res):
         self.run_btn.setEnabled(True)
+        self.last_res = res # Store for reduction
+        self.reduce_btn.setEnabled(True) # Enable reduction button
+        
         try:
             base_dir = os.path.dirname(self.path_edit.text())
             
@@ -827,6 +925,63 @@ class CrystalApp(QMainWindow):
         except Exception as e:
             self.text_log.append(f"Error saving files: {e}")
 
+    def run_cell_reduction(self):
+        if not self.last_res or 'raw_params' not in self.last_res:
+            self.text_log.append("\nError: No valid cell parameters available. Run optimization first.")
+            return
+
+        if not PYMATGEN_AVAILABLE:
+             self.text_log.append("\nError: Pymatgen is not installed. Cannot reduce cell.")
+             return
+
+        a, b, c, al, be, ga = self.last_res['raw_params']
+        self.text_log.append("\n--- Running Cell Reduction & Symmetry Analysis ---")
+        
+        # Run reduction
+        result = get_lattice_point_group(a, b, c, al, be, ga)
+        
+        if result.get("status") == "Failure":
+            self.text_log.append(f"Reduction Failed: {result.get('reason', 'Unknown')}")
+            if "error" in result:
+                 self.text_log.append(f"Details: {result['error']}")
+            return
+
+        # Format Output
+        out_str = (f"\n\n========================================\n"
+                   f"   CONVENTIONAL CELL & SYMMETRY REPORT  \n"
+                   f"========================================\n"
+                   f"Crystal System   : {result['crystal_system']}\n"
+                   f"Point Group      : {result['point_group']}\n"
+                   f"Bravais Lattice  : {result['bravais_lattice']}\n"
+                   f"Lattice Centering: {result['lattice_centering']}\n"
+                   f"Tolerance Used   : {result['tolerance_used']}\n\n"
+                   f"Conventional Parameters:\n"
+                   f"a     = {result['std_a']:.4f} Å\n"
+                   f"b     = {result['std_b']:.4f} Å\n"
+                   f"c     = {result['std_c']:.4f} Å\n"
+                   f"alpha = {result['std_alpha']:.3f}°\n"
+                   f"beta  = {result['std_beta']:.3f}°\n"
+                   f"gamma = {result['std_gamma']:.3f}°\n")
+        
+        self.text_log.append(out_str)
+        
+        # Append to file
+        try:
+            base_dir = os.path.dirname(self.path_edit.text())
+            cell_path = os.path.join(base_dir, self.cell_name.text())
+            with open(cell_path, "a", encoding='utf-8') as f:
+                f.write(out_str)
+            self.text_log.append(f"Appended results to {cell_path}")
+            
+            # Also append to log file on disk
+            log_path = os.path.join(base_dir, self.log_name.text())
+            with open(log_path, "a", encoding='utf-8') as f:
+                 f.write(out_str)
+            
+        except Exception as e:
+            self.text_log.append(f"Error appending to files: {e}")
+
+
 if __name__ == "__main__":
     multiprocessing.freeze_support() # Essential for Windows executable/multiprocessing
     app = QApplication(sys.argv)
@@ -834,4 +989,4 @@ if __name__ == "__main__":
     window = CrystalApp()
     window.show()
     sys.exit(app.exec())
-  
+    
