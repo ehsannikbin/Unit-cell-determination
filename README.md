@@ -11,19 +11,6 @@ The workflow bridges the gap between raw microscope data and crystallographic pa
 1.  **Facet Selection:** Interactive visualization and extraction of reciprocal lattice vectors.
 2.  **Unit Cell Determination:** A hybrid optimization algorithm (Global + Local) to solve unit cell parameters based on the extracted vectors.
 
-## Repository Structure
-
-The code is organized to support a multi-step workflow:
-
-```text
-.
-├── scripts/
-│   ├── 01_facet_selector.py      # GUI for processing patterns and extracting vectors
-│   ├── 02_unit_cell_finder.py    # GUI for solving the unit cell from .csv data
-├── input_data/                   # Place your .lst or .h5 files here
-├── output_data/                  # Destination for .csv results
-└── README.md                     # Project documentation
-```
 
 ## 1. Installation
 
