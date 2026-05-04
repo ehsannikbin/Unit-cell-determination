@@ -39,7 +39,7 @@ USE_HARD_FALLBACK = False
 
 # --- NLOPT DIRECT CONFIGURATION ---
 DIRECT_XTOL_REL_LEN_DEFAULT = 1e-4  # 0.01% relative precision for 1/a, 1/b, 1/c
-DIRECT_XTOL_ABS_ANG_DEFAULT = 0.05  # 0.05 degrees absolute precision for angles
+DIRECT_XTOL_ABS_ANG_DEFAULT = 0.1  # 0.05 degrees absolute precision for angles
 
 # =============================================================================
 #  PART 1: GLOBAL ALGORITHMS
@@ -1123,7 +1123,7 @@ class CrystalApp(QMainWindow):
         
         # --- Row 5 & 6: DIRECT Specific Widgets ---
         self.lbl_maxfun = QLabel("Max Evals:")
-        self.sb_maxfun = QSpinBox(); self.sb_maxfun.setRange(1000, 10000000); self.sb_maxfun.setSingleStep(100000); self.sb_maxfun.setValue(4000000)
+        self.sb_maxfun = QSpinBox(); self.sb_maxfun.setRange(1000, 10000000); self.sb_maxfun.setSingleStep(100000); self.sb_maxfun.setValue(1000000)
         
         self.lbl_xtol_len = QLabel("Len Prec (Rel):")
         self.sb_xtol_len = QDoubleSpinBox(); self.sb_xtol_len.setRange(1e-8, 0.1); self.sb_xtol_len.setDecimals(5); self.sb_xtol_len.setSingleStep(0.0001); self.sb_xtol_len.setValue(DIRECT_XTOL_REL_LEN_DEFAULT)
@@ -1202,14 +1202,15 @@ class CrystalApp(QMainWindow):
     def update_algo_inputs(self, algo_name):
         is_de = (algo_name == 'Differential Evolution')
         
-        # Toggle DE Widgets
-        for w in [self.lbl_pop, self.sb_pop, self.lbl_strat, self.combo_strat, self.lbl_workers, self.sb_workers]:
-            w.setVisible(is_de)
-            
-        # Toggle DIRECT Widgets
+        # 1. Toggle DE Widgets (Show if DE is selected)
         for w in [self.lbl_iter, self.sb_iter, self.lbl_pop, self.sb_pop, 
                   self.lbl_strat, self.combo_strat, self.lbl_workers, self.sb_workers]:
             w.setVisible(is_de)
+            
+        # 2. Toggle DIRECT Widgets (Show if DIRECT is selected)
+        for w in [self.lbl_maxfun, self.sb_maxfun, self.lbl_xtol_len, self.sb_xtol_len, 
+                  self.lbl_xtol_ang, self.sb_xtol_ang, self.chk_local_bias]:
+            w.setVisible(not is_de)
 
 
     def browse_file(self):
