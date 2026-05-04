@@ -6,7 +6,7 @@ import numpy as np
 import multiprocessing
 from math import radians
 
-# --- NEW IMPORTS FOR CELL REDUCTION ---
+# --- IMPORTS FOR CELL REDUCTION ---
 try:
     from pymatgen.core import Lattice, Structure
     from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
@@ -22,7 +22,8 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QSplitter, QMessageBox, QSizePolicy)
 from PySide6.QtCore import Qt, QThread, Signal, QObject
 
-from scipy.optimize import differential_evolution, minimize, direct
+import nlopt
+from scipy.optimize import differential_evolution, minimize
 from numba import njit
 
 # =============================================================================
@@ -36,10 +37,9 @@ MAX_PLANES_DEFAULT = 8
 # True  = Apply high penalty (Hard Fallback) - Stricter, discards bad fits immediately
 USE_HARD_FALLBACK = False
 
-# --- DIRECT DYNAMIC SCHEDULING CONFIGURATION ---
-DIRECT_NUM_STAGES = 10         # Number of dynamic decay steps for DIRECT
-DIRECT_FINAL_EPS = 0.001      # Final epsilon value at the last stage
-DIRECT_SHRINK_FACTOR = 0.80    # Factor to shrink the bounding box each stage (0.60 = 60% of previous size)
+# --- NLOPT DIRECT CONFIGURATION ---
+DIRECT_XTOL_REL_LEN_DEFAULT = 1e-4  # 0.01% relative precision for 1/a, 1/b, 1/c
+DIRECT_XTOL_ABS_ANG_DEFAULT = 0.05  # 0.05 degrees absolute precision for angles
 
 # =============================================================================
 #  PART 1: GLOBAL ALGORITHMS
@@ -611,92 +611,93 @@ class OptimizationWorker(QObject):
                 )
 
             else:
-                self.log(f"Starting DIRECT with Dynamic Eps Decay...")
+                self.log("Starting NLopt DIRECT (Global Search)...")
                 
-                total_maxfun = s['direct_maxfun']
-                num_stages = s['direct_num_stages']
-                fun_per_stage = total_maxfun // max(1, num_stages) # Safety to avoid division by zero
+                # 1. Prepare Bounds for NLopt
+                lb = [b[0] for b in bounds]
+                ub = [b[1] for b in bounds]
                 
-                initial_eps = s['direct_eps']
-                final_eps = s['direct_final_eps']
-                shrink_factor = s['direct_shrink_factor']
+                # 2. Build mixed tolerance array based on Crystal System
+                xtol_abs_array = []
+                sys_type = s['system']
+                ang_tol = s['direct_xtol_ang']
                 
-                eps_schedule = np.logspace(np.log10(initial_eps), np.log10(final_eps), num_stages)
-                
-                current_bounds = bounds.copy()
-                
-                # --- NEW: Track absolute best across all stages ---
-                overall_best_fun = np.inf
-                overall_best_x = None
-                
-                for stage in range(num_stages):
-                    current_eps = eps_schedule[stage]
-                    self.log(f"\n--- DIRECT Stage {stage+1}/{num_stages} | eps = {current_eps:.5f} | maxfun = {fun_per_stage} ---")
-                    
-                    stage_best_fun = np.inf  # Add a tracker for the stage
-                    
-                    def direct_callback(xk):
-                        nonlocal stage_best_fun
-                        direct_callback.iter += 1
-                        
-                        # Evaluate the current point SciPy hands us
-                        current_fun = objective_wrapper(
-                            xk, patterns, U, candidates, s['system'], 
-                            s['max_planes'], s['tol_len_rel'], s['tol_cos_abs'], USE_HARD_FALLBACK
-                        )
-                        
-                        # Only update our tracker if it's a true historical improvement
-                        if current_fun < stage_best_fun:
-                            stage_best_fun = current_fun
-                        
-                        if direct_callback.iter % 100 == 0:
-                            t_el = time.time() - self.start_time
-                            self.log(f"[Stage {stage+1} iter {direct_callback.iter}] time={t_el:.1f}s | best_obj={stage_best_fun:.6g}")
-                    
-                    
-                    direct_callback.iter = 0
+                # Lengths get 0.0 (disabled absolute), forcing them to use the global relative tolerance.
+                # Angles get the specific absolute tolerance.
+                if sys_type == 'triclinic': 
+                    xtol_abs_array = [0.0]*3 + [ang_tol]*3
+                elif sys_type == 'monoclinic': 
+                    xtol_abs_array = [0.0]*3 + [ang_tol]
+                elif sys_type == 'orthorhombic': 
+                    xtol_abs_array = [0.0]*3
+                elif sys_type in ['tetragonal', 'hexagonal']: 
+                    xtol_abs_array = [0.0]*2
+                elif sys_type == 'rhombohedral': 
+                    xtol_abs_array = [0.0, ang_tol]
+                elif sys_type == 'cubic': 
+                    xtol_abs_array = [0.0]
 
-                    res_stage = direct(
-                        objective_wrapper, 
-                        current_bounds, 
-                        args=args, 
-                        maxiter=s['de_maxiter'], 
-                        maxfun=fun_per_stage,      
-                        eps=current_eps,            
-                        locally_biased=s['direct_loc_bias'], 
-                        callback=direct_callback
-                    )
-                    
-                    # --- NEW: Update absolute best if we beat it ---
-                    if res_stage.fun < overall_best_fun:
-                        overall_best_fun = res_stage.fun
-                        overall_best_x = res_stage.x.copy()
-                        
-                    self.log(f"Stage {stage+1} obj: {res_stage.fun:.6g} (Global Best: {overall_best_fun:.6g})")
-                    
-                    # --- DYNAMICALLY SHRINK BOUNDS ---
-                    if stage < num_stages - 1:  
-                        new_bounds = []
-                        for i in range(len(current_bounds)):
-                            c_min, c_max = current_bounds[i]
-                            orig_min, orig_max = bounds[i] 
-                            
-                            span = c_max - c_min
-                            half_new_span = (span * shrink_factor) / 2.0
-                            
-                            # Center the new box on the TRUE overall best, never a worse stage result
-                            target_x = overall_best_x[i]
-                            
-                            n_min = max(orig_min, target_x - half_new_span)
-                            n_max = min(orig_max, target_x + half_new_span)
-                            new_bounds.append((n_min, n_max))
-                            
-                        current_bounds = new_bounds
+                # 3. Setup NLopt Object
+                algo = nlopt.GN_DIRECT_L_RAND if s['direct_loc_bias'] else nlopt.GN_DIRECT
+                opt = nlopt.opt(algo, len(bounds))
+                opt.set_lower_bounds(lb)
+                opt.set_upper_bounds(ub)
+                opt.set_maxeval(s['direct_maxfun'])
                 
-                # --- Ensure we hand the TRUE best to the local optimizer ---
-                res_global = res_stage
-                res_global.x = overall_best_x
-                res_global.fun = overall_best_fun
+                # Apply the mixed constraints
+                opt.set_xtol_rel(s['direct_xtol_len'])  # Global relative fallback
+                opt.set_xtol_abs(xtol_abs_array)       # Specific absolute overrides
+
+                # Tracking variables for the logger
+                eval_count = [0]
+                best_fun = [np.inf]
+                best_x = [None]
+                
+                # 4. Objective Wrapper
+                def nlopt_objective(x, grad):
+                    val = objective_wrapper(
+                        x, patterns, U, candidates, s['system'], 
+                        s['max_planes'], s['tol_len_rel'], s['tol_cos_abs'], USE_HARD_FALLBACK
+                    )
+                    eval_count[0] += 1
+                    
+                    if val < best_fun[0]:
+                        best_fun[0] = val
+                        best_x[0] = np.copy(x)
+                        
+                    if eval_count[0] % 10000 == 0:
+                        t_el = time.time() - self.start_time
+                        self.log(f"[NLopt eval {eval_count[0]}/{s['direct_maxfun']}] time={t_el:.1f}s | best_obj={best_fun[0]:.6g}")
+                        
+                    return val
+
+                opt.set_min_objective(nlopt_objective)
+                
+                # 5. Execute Optimization
+                x0 = np.mean(bounds, axis=1) # NLopt requires a starting array to launch
+                
+                try:
+                    res_x = opt.optimize(x0)
+                    res_fun = opt.last_optimum_value()
+                except nlopt.RoundoffLimited:
+                    self.log("NLopt halted early: Reached floating-point precision limits (RoundoffLimited).")
+                    res_x = best_x[0]
+                    res_fun = best_fun[0]
+                except Exception as e:
+                    self.log(f"NLopt halted with message: {e}")
+                    res_x = best_x[0]
+                    res_fun = best_fun[0]
+                    
+                # Safety fallback in case it exited on evaluation 0
+                if res_x is None:
+                    res_x = best_x[0]
+                    res_fun = best_fun[0]
+                
+                # Create a dummy result object so the downstream L-BFGS-B logic still works
+                class DummyResult: pass
+                res_global = DummyResult()
+                res_global.x = res_x
+                res_global.fun = res_fun
 
             self.log(f"Global Search finished. time={time.time()-self.start_time:.1f}s best_fun={res_global.fun:.6g}")
 
@@ -1120,35 +1121,30 @@ class CrystalApp(QMainWindow):
         grid.addWidget(self.lbl_workers, 4, 0)
         grid.addWidget(self.sb_workers, 4, 1)
         
-        # --- Row 5, 6 & 7: DIRECT Specific Widgets ---
+        # --- Row 5 & 6: DIRECT Specific Widgets ---
         self.lbl_maxfun = QLabel("Max Evals:")
         self.sb_maxfun = QSpinBox(); self.sb_maxfun.setRange(1000, 10000000); self.sb_maxfun.setSingleStep(100000); self.sb_maxfun.setValue(4000000)
-        self.lbl_eps = QLabel("Initial Eps:")
-        self.sb_eps = QDoubleSpinBox(); self.sb_eps.setRange(1e-6, 1.0); self.sb_eps.setDecimals(4); self.sb_eps.setSingleStep(0.01); self.sb_eps.setValue(0.2)
         
-        self.lbl_stages = QLabel("Decay Stages:")
-        self.sb_stages = QSpinBox(); self.sb_stages.setRange(1, 100); self.sb_stages.setValue(DIRECT_NUM_STAGES)
-        self.lbl_final_eps = QLabel("Final Eps:")
-        self.sb_final_eps = QDoubleSpinBox(); self.sb_final_eps.setRange(1e-6, 1.0); self.sb_final_eps.setDecimals(5); self.sb_final_eps.setSingleStep(0.0001); self.sb_final_eps.setValue(DIRECT_FINAL_EPS)
+        self.lbl_xtol_len = QLabel("Len Prec (Rel):")
+        self.sb_xtol_len = QDoubleSpinBox(); self.sb_xtol_len.setRange(1e-8, 0.1); self.sb_xtol_len.setDecimals(5); self.sb_xtol_len.setSingleStep(0.0001); self.sb_xtol_len.setValue(DIRECT_XTOL_REL_LEN_DEFAULT)
+        self.sb_xtol_len.setToolTip("Relative tolerance for reciprocal lengths (e.g., 0.0001 = 0.01% precision)")
 
-        self.lbl_shrink = QLabel("Shrink Factor:")
-        self.sb_shrink = QDoubleSpinBox(); self.sb_shrink.setRange(0.1, 1.0); self.sb_shrink.setDecimals(2); self.sb_shrink.setSingleStep(0.05); self.sb_shrink.setValue(DIRECT_SHRINK_FACTOR)
-        self.chk_local_bias = QCheckBox("Locally Biased")
+        self.lbl_xtol_ang = QLabel("Ang Prec (Abs°):")
+        self.sb_xtol_ang = QDoubleSpinBox(); self.sb_xtol_ang.setRange(1e-5, 5.0); self.sb_xtol_ang.setDecimals(4); self.sb_xtol_ang.setSingleStep(0.01); self.sb_xtol_ang.setValue(DIRECT_XTOL_ABS_ANG_DEFAULT)
+        self.sb_xtol_ang.setToolTip("Absolute tolerance for angles in degrees")
+
+        self.chk_local_bias = QCheckBox("Locally Biased (RAND)")
         self.chk_local_bias.setChecked(True)
+        self.chk_local_bias.setToolTip("Uses NLOPT_GN_DIRECT_L_RAND. Uncheck for standard NLOPT_GN_DIRECT.")
         
         grid.addWidget(self.lbl_maxfun, 5, 0)
         grid.addWidget(self.sb_maxfun, 5, 1)
-        grid.addWidget(self.lbl_eps, 5, 2)
-        grid.addWidget(self.sb_eps, 5, 3)
+        grid.addWidget(self.lbl_xtol_len, 5, 2)
+        grid.addWidget(self.sb_xtol_len, 5, 3)
         
-        grid.addWidget(self.lbl_stages, 6, 0)
-        grid.addWidget(self.sb_stages, 6, 1)
-        grid.addWidget(self.lbl_final_eps, 6, 2)
-        grid.addWidget(self.sb_final_eps, 6, 3)
-        
-        grid.addWidget(self.lbl_shrink, 7, 0)
-        grid.addWidget(self.sb_shrink, 7, 1)
-        grid.addWidget(self.chk_local_bias, 7, 2, 1, 2)
+        grid.addWidget(self.lbl_xtol_ang, 6, 0)
+        grid.addWidget(self.sb_xtol_ang, 6, 1)
+        grid.addWidget(self.chk_local_bias, 6, 2, 1, 2)
         
         main_algo_layout.addLayout(grid)
         
@@ -1209,16 +1205,12 @@ class CrystalApp(QMainWindow):
         # Toggle DE Widgets
         for w in [self.lbl_pop, self.sb_pop, self.lbl_strat, self.combo_strat, self.lbl_workers, self.sb_workers]:
             w.setVisible(is_de)
-            # lbl = self.algo_layout_col1.labelForField(w)
-            # if lbl: lbl.setVisible(is_de)
             
         # Toggle DIRECT Widgets
-        for w in [self.lbl_maxfun, self.sb_maxfun, self.lbl_eps, self.sb_eps, 
-                  self.lbl_stages, self.sb_stages, self.lbl_final_eps, self.sb_final_eps,
-                  self.lbl_shrink, self.sb_shrink, self.chk_local_bias]:
+        for w in [self.lbl_maxfun, self.sb_maxfun, self.lbl_xtol_len, self.sb_xtol_len, 
+                  self.lbl_xtol_ang, self.sb_xtol_ang, self.chk_local_bias]:
             w.setVisible(not is_de)
-            # lbl = self.algo_layout_col2.labelForField(w)
-            # if lbl: lbl.setVisible(not is_de)
+
 
     def browse_file(self):
         f, _ = QFileDialog.getOpenFileName(self, "Select CSV", "", "CSV Files (*.csv)")
@@ -1316,10 +1308,8 @@ class CrystalApp(QMainWindow):
             'algorithm': self.combo_algo.currentText(), 
 
             'direct_maxfun': self.sb_maxfun.value(),
-            'direct_eps': self.sb_eps.value(),
-            'direct_num_stages': self.sb_stages.value(),
-            'direct_final_eps': self.sb_final_eps.value(),
-            'direct_shrink_factor': self.sb_shrink.value(),
+            'direct_xtol_len': self.sb_xtol_len.value(),
+            'direct_xtol_ang': self.sb_xtol_ang.value(),
             'direct_loc_bias': self.chk_local_bias.isChecked()
         }
 
