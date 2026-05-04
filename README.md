@@ -38,7 +38,7 @@ This script calculates the autocorrelation of diffraction patterns to help users
 
 **Run the script:**
 ```bash
-python scripts/01_facet_selector.py
+python facet_selector.py
 ```
 
 ### GUI Features & Controls
@@ -69,7 +69,7 @@ This script takes the output from Step 1 (`facet_vectors.csv`) and determines th
 
 **Run the script:**
 ```bash
-python scripts/02_unit_cell_finder.py
+python find_cell_parameters.py
 ```
 
 ### GUI Features & Controls
