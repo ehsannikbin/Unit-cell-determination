@@ -46,7 +46,7 @@ DIRECT_SHRINK_FACTOR = 0.80    # Factor to shrink the bounding box each stage (0
 # =============================================================================
 
 @njit(fastmath=True, cache=True)
-def fast_objective_loop(patterns, U, H, G, max_planes, tol_len_rel, tol_cos_abs, use_hard_fallback):
+def fast_objective_loop(patterns, U, H, G, max_planes, tol_len_rel, tol_ang_abs_rad, use_hard_fallback):
     n_cand = U.shape[0]
     
     GU_rows = np.zeros((n_cand, 3))
@@ -82,6 +82,7 @@ def fast_objective_loop(patterns, U, H, G, max_planes, tol_len_rel, tol_cos_abs,
         l1 = patterns[p_idx, 0]
         l2 = patterns[p_idx, 1]
         cos_obs = patterns[p_idx, 2]
+        theta_obs_rad = np.arccos(cos_obs)
         
         # --- 1. Filter l1 with Two-Pointer Expansion ---
         insert_idx1 = np.searchsorted(sorted_lens, l1)
@@ -167,7 +168,13 @@ def fast_objective_loop(patterns, U, H, G, max_planes, tol_len_rel, tol_cos_abs,
                 if cp > 1.0: cp = 1.0
                 elif cp < -1.0: cp = -1.0
                 
-                if abs(cp - cos_obs) > tol_cos_abs: continue
+                angle_diff = abs(np.arccos(cp) - theta_obs_rad)
+                if angle_diff > tol_ang_abs_rad: 
+                    if angle_diff < best_invalid_diff:
+                        best_invalid_diff = angle_diff
+                        best_invalid_i = i
+                        best_invalid_j = j
+                    continue
                 
                 sp = np.sqrt(1.0 - cp**2)
                 ql1, ql2 = pred_lens_all[i], pred_lens_all[j]
@@ -191,7 +198,7 @@ def fast_objective_loop(patterns, U, H, G, max_planes, tol_len_rel, tol_cos_abs,
     return total_residual
 
 @njit(fastmath=True, cache=True)
-def get_best_assignments(patterns, U, H, G, max_planes, tol_len_rel, tol_cos_abs, use_hard_fallback):
+def get_best_assignments(patterns, U, H, G, max_planes, tol_len_rel, tol_ang_abs_rad, use_hard_fallback):
     n_cand = U.shape[0]
     GU_rows = np.zeros((n_cand, 3))
     for i in range(n_cand):
@@ -224,6 +231,7 @@ def get_best_assignments(patterns, U, H, G, max_planes, tol_len_rel, tol_cos_abs
         l1 = patterns[p_idx, 0]
         l2 = patterns[p_idx, 1]
         cos_obs = patterns[p_idx, 2]
+        theta_obs_rad = np.arccos(cos_obs)
         
         insert_idx1 = np.searchsorted(sorted_lens, l1)
         count1 = 0
@@ -292,7 +300,13 @@ def get_best_assignments(patterns, U, H, G, max_planes, tol_len_rel, tol_cos_abs
                 if cp > 1.0: cp = 1.0
                 elif cp < -1.0: cp = -1.0
                 
-                if abs(cp - cos_obs) > tol_cos_abs: continue
+                angle_diff = abs(np.arccos(cp) - theta_obs_rad)
+                if angle_diff > tol_ang_abs_rad: 
+                    if angle_diff < best_invalid_diff:
+                        best_invalid_diff = angle_diff
+                        best_invalid_i = i
+                        best_invalid_j = j
+                    continue
                 
                 sp = np.sqrt(1.0 - cp**2)
                 ql1, ql2 = pred_lens_all[i], pred_lens_all[j]
@@ -417,7 +431,7 @@ def vec6_to_G(vec6):
 
 # IMPORTANT: This wrapper must accept ALL data as arguments.
 # This allows 'differential_evolution' to pickle it and send it to workers.
-def objective_wrapper(free, patterns, U, candidates, system, max_planes, tol_len_rel, tol_cos_abs, use_hard_fallback):
+def objective_wrapper(free, patterns, U, candidates, system, max_planes, tol_len_rel, tol_ang_abs_rad, use_hard_fallback):
     vec6 = free_to_metric_vector(free, system)
     G = vec6_to_G(vec6)
 
@@ -430,7 +444,7 @@ def objective_wrapper(free, patterns, U, candidates, system, max_planes, tol_len
         return 1e12
 
     # Pass it to the loop
-    return fast_objective_loop(patterns, U, candidates, G, max_planes, tol_len_rel, tol_cos_abs, use_hard_fallback)
+    return fast_objective_loop(patterns, U, candidates, G, max_planes, tol_len_rel, tol_ang_abs_rad, use_hard_fallback)
 
 def local_objective_wrapper(free, patterns, U, candidates, system, assignments):
     vec6 = free_to_metric_vector(free, system)
@@ -570,7 +584,7 @@ class OptimizationWorker(QObject):
             bounds = self.get_bounds(s['system'], s['ranges'])
 
             # 4. Arguments
-            args = (patterns, U, candidates, s['system'], s['max_planes'], s['tol_len_rel'], s['tol_cos_abs'], USE_HARD_FALLBACK)
+            args = (patterns, U, candidates, s['system'], s['max_planes'], s['tol_len_rel'], s['tol_ang_abs_rad'], USE_HARD_FALLBACK)
 
             # 5. Global Search
             self.log(f"Starting {s['algorithm']} (global search)...")
@@ -741,7 +755,7 @@ class OptimizationWorker(QObject):
             # Extract the best fixed integer assignments from the global DE result
             vec6_best = free_to_metric_vector(current_x, s['system'])
             G_best = vec6_to_G(vec6_best)
-            best_assignments = get_best_assignments(patterns, U, candidates, G_best, s['max_planes'], s['tol_len_rel'], s['tol_cos_abs'], USE_HARD_FALLBACK)
+            best_assignments = get_best_assignments(patterns, U, candidates, G_best, s['max_planes'], s['tol_len_rel'], s['tol_ang_abs_rad'], USE_HARD_FALLBACK)
             
             # Pass the fixed assignments into the smooth local objective
             local_args = (patterns, U, candidates, s['system'], best_assignments)
@@ -870,10 +884,10 @@ class OptimizationWorker(QObject):
     def calculate_scores(self, patterns, U, candidates, free_params, s):
         vec6 = free_to_metric_vector(free_params, s['system'])
         G = vec6_to_G(vec6)
-        return _fast_score_calc(patterns, U, candidates, G, s['max_planes'], s['tol_len_rel'], s['tol_cos_abs'], USE_HARD_FALLBACK)
+        return _fast_score_calc(patterns, U, candidates, G, s['max_planes'], s['tol_len_rel'], s['tol_ang_abs_rad'], USE_HARD_FALLBACK)
 
 @njit(fastmath=True)
-def _fast_score_calc(patterns, U, H, G, max_planes, tol_len_rel, tol_cos_abs, use_hard_fallback):
+def _fast_score_calc(patterns, U, H, G, max_planes, tol_len_rel, tol_ang_abs_rad, use_hard_fallback):
     n_cand = U.shape[0]
     GU_rows = np.zeros((n_cand, 3))
     for i in range(n_cand):
@@ -905,7 +919,7 @@ def _fast_score_calc(patterns, U, H, G, max_planes, tol_len_rel, tol_cos_abs, us
     
     for p in range(len(patterns)):
         l1, l2, cos_obs = patterns[p]
-        
+        theta_obs_rad = np.arccos(cos_obs)
         insert_idx1 = np.searchsorted(sorted_lens, l1)
         count1 = 0
         left, right = insert_idx1 - 1, insert_idx1
@@ -964,7 +978,13 @@ def _fast_score_calc(patterns, U, H, G, max_planes, tol_len_rel, tol_cos_abs, us
                 if cp>1: cp=1
                 if cp<-1: cp=-1
                 
-                if abs(cp - cos_obs) > tol_cos_abs: continue
+                angle_diff = abs(np.arccos(cp) - theta_obs_rad)
+                if angle_diff > tol_ang_abs_rad: 
+                    if angle_diff < best_invalid_diff:
+                        best_invalid_diff = angle_diff
+                        best_invalid_i = i
+                        best_invalid_j = j
+                    continue
                 
                 sp = np.sqrt(1.0-cp**2)
                 ql1, ql2 = pred_lens[i], pred_lens[j]
@@ -1101,12 +1121,12 @@ class CrystalApp(QMainWindow):
         
         # --- Row 1: K & Tolerances ---
         self.sb_max_planes = QSpinBox(); self.sb_max_planes.setRange(2, 500); self.sb_max_planes.setValue(MAX_PLANES_DEFAULT)
-        self.sb_tol_cos = QDoubleSpinBox(); self.sb_tol_cos.setSingleStep(0.01); self.sb_tol_cos.setValue(0.15)
+        self.sb_tol_ang = QDoubleSpinBox(); self.sb_tol_ang.setRange(0.1, 45.0); self.sb_tol_ang.setSingleStep(0.5); self.sb_tol_ang.setValue(5.0)
         
         grid.addWidget(QLabel("Max Planes:"), 1, 0)
         grid.addWidget(self.sb_max_planes, 1, 1)
-        grid.addWidget(QLabel("Cos Tol (Abs):"), 1, 2)
-        grid.addWidget(self.sb_tol_cos, 1, 3)
+        grid.addWidget(QLabel("Angle Tol (°):"), 1, 2)
+        grid.addWidget(self.sb_tol_ang, 1, 3)
         
         # --- Row 2: Global Search Selection ---
         self.combo_algo = QComboBox()
@@ -1322,7 +1342,7 @@ class CrystalApp(QMainWindow):
             'M': self.sb_M.value(),
             'max_planes': self.sb_max_planes.value(),
             'tol_len_rel': self.sb_tol_rel.value(),
-            'tol_cos_abs': self.sb_tol_cos.value(),
+            'tol_ang_abs_rad': np.radians(self.sb_tol_ang.value()),
             'de_popsize': self.sb_pop.value(),
             'de_maxiter': self.sb_iter.value(),
             'de_strategy': self.combo_strat.currentText(),
