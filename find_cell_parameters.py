@@ -585,7 +585,7 @@ class OptimizationWorker(QObject):
                     val = objective_wrapper(xk, *args)
                     if val < de_callback.best: de_callback.best = val
                     
-                    if de_callback.iter % 10 == 0:
+                    if de_callback.iter % 20 == 0:
                         t_el = time.time() - self.start_time
                         msg = f"[DE gen {de_callback.iter}] time={t_el:.1f}s obj={val:.6g} best={de_callback.best:.6g} conv={convergence:.4g}"
                         self.log(msg)
@@ -594,16 +594,29 @@ class OptimizationWorker(QObject):
                 de_callback.best = np.inf
     
                 n_workers = s['workers']
+                strat = s['de_strategy']
+                
+                # Dynamically set mutation bounds based on the strategy family
+                if strat.startswith('rand1') or strat.startswith('rand2'):
+                    # Purely random strategies need higher mutation (dithering) to explore
+                    mut_bounds = (0.5, 1.9)
+                elif strat.startswith('randtobest'):
+                    # Hybrid exploratory/exploitative
+                    mut_bounds = (0.4, 1.8) 
+                else:
+                    # best1bin, best2bin - highly exploitative, lower mutation is safer 
+                    # as long as the population size is decent
+                    mut_bounds = (0.2, 1.5)
                 
                 res_global = differential_evolution(
                     objective_wrapper, 
                     bounds,
                     args=args, 
-                    strategy=s['de_strategy'],
+                    strategy=strat,
                     maxiter=s['de_maxiter'],
                     popsize=s['de_popsize'],
                     tol=s['de_tol'],
-                    mutation=(0.5, 1.9) if s['de_strategy']=='rand1bin' else (0.2, 1.5),
+                    mutation=mut_bounds,
                     recombination=0.7,
                     callback=de_callback,
                     workers=n_workers,
@@ -1109,7 +1122,13 @@ class CrystalApp(QMainWindow):
         self.lbl_pop = QLabel("Pop Size:")
         self.sb_pop = QSpinBox(); self.sb_pop.setRange(10, 500); self.sb_pop.setValue(100)
         self.lbl_strat = QLabel("Strategy:")
-        self.combo_strat = QComboBox(); self.combo_strat.addItems(['best1bin', 'rand1bin'])
+        self.combo_strat = QComboBox(); self.combo_strat.addItems([
+            'randtobest1bin',
+            'best1bin', 
+            'best2bin',
+            'rand1bin',   
+            'rand2bin'
+        ])
         self.lbl_workers = QLabel("Processors:")
         self.sb_workers = QSpinBox(); self.sb_workers.setRange(-1, 64); self.sb_workers.setValue(-1)
         
