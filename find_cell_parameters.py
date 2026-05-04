@@ -1100,10 +1100,10 @@ class CrystalApp(QMainWindow):
         self.combo_algo = QComboBox()
         self.combo_algo.addItems(['Differential Evolution', 'Direct'])
         self.sb_iter = QSpinBox(); self.sb_iter.setRange(10, 999999); self.sb_iter.setSingleStep(100); self.sb_iter.setValue(2000)
-        
+        self.lbl_iter = QLabel("Max Iter:")
         grid.addWidget(QLabel("Global Search:"), 2, 0)
         grid.addWidget(self.combo_algo, 2, 1)
-        grid.addWidget(QLabel("Max Iter:"), 2, 2)
+        grid.addWidget(self.lbl_iter, 2, 2)
         grid.addWidget(self.sb_iter, 2, 3)
         
         # --- Row 3 & 4: DE Specific Widgets ---
@@ -1207,9 +1207,9 @@ class CrystalApp(QMainWindow):
             w.setVisible(is_de)
             
         # Toggle DIRECT Widgets
-        for w in [self.lbl_maxfun, self.sb_maxfun, self.lbl_xtol_len, self.sb_xtol_len, 
-                  self.lbl_xtol_ang, self.sb_xtol_ang, self.chk_local_bias]:
-            w.setVisible(not is_de)
+        for w in [self.lbl_iter, self.sb_iter, self.lbl_pop, self.sb_pop, 
+                  self.lbl_strat, self.combo_strat, self.lbl_workers, self.sb_workers]:
+            w.setVisible(is_de)
 
 
     def browse_file(self):
