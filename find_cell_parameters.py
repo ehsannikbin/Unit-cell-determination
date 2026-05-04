@@ -150,6 +150,10 @@ def fast_objective_loop(patterns, U, H, G, max_planes, tol_len_rel, tol_ang_abs_
         p_norms_sq = l1**2 + l2**2
         min_r_pattern = 1e20 
 
+        best_invalid_diff = 1e10 
+        best_invalid_i = -1
+        best_invalid_j = -1
+
         # --- EVALUATE NEIGHBORS ---
         for ii in range(count1):
             i = idx1[ii]
@@ -193,6 +197,38 @@ def fast_objective_loop(patterns, U, H, G, max_planes, tol_len_rel, tol_ang_abs_
                 weighted_res = r_raw * (H_sq[i] + H_sq[j])
                 if weighted_res < min_r_pattern: min_r_pattern = weighted_res
         
+        # --- The Seamless Geometric Fallback ---
+        if min_r_pattern == 1e20 and best_invalid_i != -1:
+            # Nothing passed the angle check. Evaluate the absolute closest failing pair!
+            i = best_invalid_i
+            j = best_invalid_j
+            
+            dot_val = 0.0
+            for k in range(3): dot_val += U[i,k] * GU_rows[j,k]
+            cp = dot_val / (pred_lens_all[i] * pred_lens_all[j] + eps)
+            if cp > 1.0: cp = 1.0
+            elif cp < -1.0: cp = -1.0
+            
+            sp = np.sqrt(1.0 - cp**2)
+            ql1, ql2 = pred_lens_all[i], pred_lens_all[j]
+            t2, t3 = ql2 * cp, ql2 * sp
+            
+            A11, A12 = ql1 * p11 + t2 * p12, t2 * p22
+            A21, A22 = t3 * p12, t3 * p22
+            
+            tr = A11**2 + A12**2 + A21**2 + A22**2
+            det_A = A11*A22 - A12*A21
+            sumS = np.sqrt(tr + 2.0 * abs(det_A))
+            
+            r_raw = p_norms_sq + ql1**2 + ql2**2 - 2.0 * sumS
+            if r_raw < 0.0: r_raw = 0.0
+            min_r_pattern = r_raw * (H_sq[i] + H_sq[j])
+
+        # If it's still 1e20 here, it means all pairs were perfectly collinear (cx, cy, cz < 1e-14)
+        # That is a true impossibility, so a 1e9 cliff is actually appropriate here.
+        if min_r_pattern == 1e20:
+            min_r_pattern = 1e9
+                
         total_residual += min_r_pattern
 
     return total_residual
@@ -285,6 +321,10 @@ def get_best_assignments(patterns, U, H, G, max_planes, tol_len_rel, tol_ang_abs
         min_r_pattern = 1e20 
         best_i = -1; best_j = -1
 
+        best_invalid_diff = 1e10 
+        best_invalid_i = -1
+        best_invalid_j = -1
+
         for ii in range(count1):
             i = idx1[ii]
             for jj in range(count2):
@@ -325,6 +365,33 @@ def get_best_assignments(patterns, U, H, G, max_planes, tol_len_rel, tol_ang_abs
                 if weighted_res < min_r_pattern:
                     min_r_pattern = weighted_res
                     best_i, best_j = i, j
+
+        if min_r_pattern == 1e20 and best_invalid_i != -1:
+            i = best_invalid_i
+            j = best_invalid_j
+            
+            dot_val = 0.0
+            for k in range(3): dot_val += U[i,k] * GU_rows[j,k]
+            cp = dot_val / (pred_lens_all[i] * pred_lens_all[j] + eps)
+            if cp > 1.0: cp = 1.0
+            elif cp < -1.0: cp = -1.0
+            
+            sp = np.sqrt(1.0 - cp**2)
+            ql1, ql2 = pred_lens_all[i], pred_lens_all[j]
+            t2, t3 = ql2 * cp, ql2 * sp
+            
+            A11, A12 = ql1 * p11 + t2 * p12, t2 * p22
+            A21, A22 = t3 * p12, t3 * p22
+            
+            tr = A11**2 + A12**2 + A21**2 + A22**2
+            det = A11*A22 - A12*A21
+            sumS = np.sqrt(tr + 2.0 * abs(det))
+            
+            r_raw = p_norms_sq + ql1**2 + ql2**2 - 2.0 * sumS
+            if r_raw < 0.0: r_raw = 0.0
+            
+            best_i = i
+            best_j = j
                     
         assignments[p_idx, 0] = best_i
         assignments[p_idx, 1] = best_j
@@ -961,7 +1028,11 @@ def _fast_score_calc(patterns, U, H, G, max_planes, tol_len_rel, tol_ang_abs_rad
 
         sin_obs = np.sqrt(max(0.0, 1.0-cos_obs**2))
         p_norms = l1**2 + l2**2
-        min_r = 1e9
+        min_r = 1e20
+        
+        best_invalid_diff = 1e10 
+        best_invalid_i = -1
+        best_invalid_j = -1
         
         for ii in range(count1):
             i = idx1[ii]
@@ -1002,6 +1073,36 @@ def _fast_score_calc(patterns, U, H, G, max_planes, tol_len_rel, tol_ang_abs_rad
                 if r<0: r=0
                 w_r = r * (H_sq[i]+H_sq[j])
                 if w_r < min_r: min_r = w_r
+
+        if min_r == 1e20 and best_invalid_i != -1:
+            i = best_invalid_i
+            j = best_invalid_j
+            
+            dot = 0.0
+            for k in range(3): dot += U[i,k] * GU_rows[j,k]
+            cp = dot / (pred_lens[i] * pred_lens[j] + eps)
+            if cp > 1.0: cp = 1.0
+            elif cp < -1.0: cp = -1.0
+            
+            sp = np.sqrt(1.0 - cp**2)
+            ql1, ql2 = pred_lens[i], pred_lens[j]
+            t2 = ql2 * cp; t3 = ql2 * sp
+            
+            A11 = ql1*l1 + t2*l2*cos_obs
+            A12 = t2*l2*sin_obs
+            A21 = t3*l2*cos_obs
+            A22 = t3*l2*sin_obs
+            
+            tr = A11**2 + A12**2 + A21**2 + A22**2
+            det = A11*A22 - A12*A21
+            sumS = np.sqrt(tr + 2*abs(det))
+            r = p_norms + ql1**2 + ql2**2 - 2*sumS
+            if r < 0: r = 0
+            min_r = r * (H_sq[i] + H_sq[j])
+
+        if min_r == 1e20:
+            min_r = 1e9
+
         scores[p] = min_r
     return scores
 
