@@ -18,8 +18,8 @@ To ensure all dependencies (GUI, math, plotting, JIT compilation) work correctly
 
 **1. Clone the repository:**
 ```bash
-git clone [https://github.com/YOUR_USERNAME/REPO_NAME.git](https://github.com/YOUR_USERNAME/REPO_NAME.git)
-cd REPO_NAME
+git clone https://github.com/ehsannikbin/Unit-cell-determination.git
+cd Unit-cell-determination
 ```
 
 **2. Create the environment:**
