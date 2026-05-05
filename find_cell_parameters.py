@@ -736,7 +736,7 @@ class OptimizationWorker(QObject):
                         # Evaluate the current point SciPy hands us
                         current_fun = objective_wrapper(
                             xk, patterns, U, candidates, s['system'], 
-                            s['max_planes'], s['tol_len_rel'], s['tol_cos_abs'], USE_HARD_FALLBACK
+                            s['max_planes'], s['tol_len_rel'], s['tol_ang_abs_rad'], USE_HARD_FALLBACK
                         )
                         
                         # Only update our tracker if it's a true historical improvement
@@ -1244,8 +1244,8 @@ class CrystalApp(QMainWindow):
         self.sb_pop = QSpinBox(); self.sb_pop.setRange(10, 500); self.sb_pop.setValue(100)
         self.lbl_strat = QLabel("Strategy:")
         self.combo_strat = QComboBox(); self.combo_strat.addItems([
-            'randtobest1bin',
-            'best1bin', 
+            'best1bin',
+            'randtobest1bin', 
             'best2bin',
             'rand1bin',   
             'rand2bin'
