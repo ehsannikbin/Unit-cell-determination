@@ -28,15 +28,15 @@ from PySide6.QtCore import Qt
 # ----------------- USER PARAMETERS -----------------
 show_peaks = True
 show_facets = True
-autocorr_peak_min_sep = 6
-autocorr_threshold_rel = 0.18
+autocorr_peak_min_sep = 4
+autocorr_threshold_rel = 0.1
 ignore_radius = 3
 energy_keV = 90.0
-camera_length_m = 0.406
+camera_length_m = 0.403
 pixel_size_m = 55e-6
 include_patterns_by_default = False
 DEFAULT_MAX_PATTERNS = 500
-min_ang = 29.0
+min_ang = 14.0
 max_ang = 96.0
 # ---------------------------------------------------
 
