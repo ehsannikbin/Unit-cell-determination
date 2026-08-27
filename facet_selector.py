@@ -38,6 +38,9 @@ include_patterns_by_default = False
 DEFAULT_MAX_PATTERNS = 500
 min_ang = 14.0
 max_ang = 96.0
+
+el_rat = 1.0
+el_ang = 0.0
 # ---------------------------------------------------
 
 h = 6.62607015e-34
@@ -50,6 +53,35 @@ def compute_wavelength(e_keV):
     return h / np.sqrt(2*m0*e_charge*V*(1 + e_charge*V/(2*m0*c**2)))
 
 wavelength_m = compute_wavelength(energy_keV)
+
+
+def apply_distortion(img, peaks, cx, cy, el_rat, el_ang):
+    if el_rat == 1.0 and el_ang == 0.0:
+        return img, peaks, cx, cy
+        
+    c, s = np.cos(np.radians(el_ang)), np.sin(np.radians(el_ang))
+    R = np.array([[c, -s], [s, c]])
+    RR = R.T @ (np.array([[el_rat**(-0.5)], [el_rat**(0.5)]]) * R)
+    
+    # Transform peaks relative to the beam center
+    if len(peaks) > 0:
+        peaks_shifted = peaks - np.array([cx, cy])
+        peaks_transformed = (RR @ peaks_shifted.T).T + np.array([cx, cy])
+    else:
+        peaks_transformed = peaks
+        
+    # Transform image (requires inverse mapping for scipy's affine_transform)
+    RR_inv = np.linalg.inv(RR)
+    # Convert (x,y) matrix to (row, col) i.e., (y,x) format for scipy
+    T_yx = np.array([[RR_inv[1, 1], RR_inv[1, 0]],
+                     [RR_inv[0, 1], RR_inv[0, 0]]])
+    
+    # Offset keeps the image rotation/scaling centered on (cx, cy)
+    center_yx = np.array([cy, cx])
+    offset = center_yx - T_yx @ center_yx
+    img_transformed = ndimage.affine_transform(img, T_yx, offset=offset, order=1)
+    
+    return img_transformed, peaks_transformed, cx, cy
 
 # ---------- Math / Physics Functions ---------- 
 def autocorr_from_peaks(peaks, shape):
@@ -238,6 +270,9 @@ def worker_process_file(args):
                     pys = np.array(peakY_ds[i][:n], float)
                     peaks = np.column_stack((pxs, pys)) if pxs.size else np.zeros((0,2))
                     cx, cy = float(cx_ds[i]), float(cy_ds[i])
+
+                    # Apply Transformation
+                    img, peaks, cx, cy = apply_distortion(img, peaks, cx, cy, cfg['el_rat'], cfg['el_ang'])
                     
                     res_item = {
                         'img': img,
@@ -373,7 +408,9 @@ def process_file_paths(file_paths, max_patterns, num_processors, min_spots_val, 
         'wavelength_m': wavelength_m, 
         'min_spots': min_spots_val, 
         'tol_pixels': tol_pixels_val,
-        'scaling_factor': scaling_factor_val
+        'scaling_factor': scaling_factor_val,
+        'el_rat': el_rat,
+        'el_ang': el_ang
     }
     
     tasks = []
@@ -634,6 +671,27 @@ class QtViewer(QtWidgets.QMainWindow):
         ig_layout.addWidget(self.pixsize_spin, 1, 1)
         ctrl_layout.addWidget(instr_group)
 
+        self.el_rat_spin = QtWidgets.QDoubleSpinBox()
+        self.el_rat_spin.setRange(0.1, 5.0)
+        self.el_rat_spin.setDecimals(3)
+        self.el_rat_spin.setSingleStep(0.001)
+        self.el_rat_spin.setValue(el_rat)
+
+        self.el_ang_spin = QtWidgets.QDoubleSpinBox()
+        self.el_ang_spin.setRange(-180.0, 180.0)
+        self.el_ang_spin.setSingleStep(1.0)
+        self.el_ang_spin.setValue(el_ang)
+
+        # Get the next available row in the layout
+        row = ig_layout.rowCount()
+        
+        # Add all widgets to the same row across columns 0 to 3
+        ig_layout.addWidget(QtWidgets.QLabel("Elliptical Ratio"), row, 0)
+        ig_layout.addWidget(self.el_rat_spin, row, 1)
+
+        ig_layout.addWidget(QtWidgets.QLabel("Elliptical Angle"), row, 2)
+        ig_layout.addWidget(self.el_ang_spin, row, 3)
+
         # --- COMPACTED LATTICE FILTER ---
         filter_group = QtWidgets.QGroupBox("Quality & Lattice Filter")
         filter_layout = QtWidgets.QGridLayout(filter_group)
@@ -818,6 +876,9 @@ class QtViewer(QtWidgets.QMainWindow):
 
     # ---------------- file loading handlers ----------------
     def load_files_list_dialog(self):
+        global el_rat, el_ang
+        el_rat = self.el_rat_spin.value()
+        el_ang = self.el_ang_spin.value()
         fn, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Open files list", self.current_folder,
                                                       "List files (*.lst *.txt);;All files (*)")
         if not fn:
